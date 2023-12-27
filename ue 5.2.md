@@ -427,9 +427,32 @@ void FOpenGLDynamicRHI::RHIDrawIndexedPrimitive(FRHIBuffer* IndexBufferRHI, int3
 在执行完`AddCommand`和`FinalizeCommand`之后，DepthPass的`MeshProcessor`中就有了Cube对应的`FMeshBatch`所生成的`FMeshDrawCommand`的信息。最终生成的`FMeshDrawCommand`的信息主要有着色器绑定(ShaderBindings)、顶点流(VertexStreams)、索引缓冲(IndexBuffer)、PSO(CachedPipelineId)、绘制参数(FirstIndex、NumPrimitive、NumInstances)等。`FDepthPassMeshProcessor`最后共生成了一个`FMeshDrawCommand`，其中的信息可以和Cube的几何信息相对应。
 ![Alt text](image-28.png)
 
-#### 设置RHICommandList与提交绘制命令
-`FMeshDrawCommand::SubmitDraw`中会调用`FMeshDrawCommand::SubmitDrawBegin`将`FMeshDrawCommand`的信息转为`RHICommand`并添加到`RHICommandList`，然后调用`FMeshDrawCommand::SubmitDrawEnd`创建绘制相关的`RHICommand`。
+#### 生成RHICommand
+在`RenderPrePass`的入口打断点发现在进行`PrePass`的`RHICommand`生成前`RHICommandList`中共有95个`RHICommand`。
+![Alt text](image-37.png)
+与RDG的`Passes`列表对照，可以发现这些`RHICommand`是在`RenderPrePass`之前加入RDG的`Pass`生成的。
+截取最后的几个`RHICommand`为例子，`FRHICommandBeginRenderPass`中有该`RenderPass`的`Info`和`Name`等信息，对照可以发现这几条`RHICommand`是RDG的`Passes`列表末尾的`Scene.ClearDepthStencil`生成的。
+![Alt text](image-38.png)
+![Alt text](image-39.png)
+
+在`PrePass`被加入`GraphBuilder`(RDG)之前，会先执行`FParallelMeshDrawCommandPass::BuildRenderingCommands`生成多条`RHICommand`，这些`RHICommand`主要在GPU上使用ComputeShader进行剔除相关的计算。
+在`BuildRenderingCommands`完成后`RHICommandList`中共有131个`RHICommand`。
+![Alt text](image-40.png)
+
+在`PrePass`被加入`GraphBuilder`后，会进行一系列的资源的处理，到执行`DisPatchDraw`中`SubmitDrawCommands`之前，`RHICommandList`中又生成了8条`RHICommand`命令，这些命令分别是
+[131] pop之前的event
+[132] 设置Breadcrumb（面包屑）调试信息，具体为`PrePass DDM_ALLOpaque(Forced by Nanite)`
+[133] push当前的event，具体为`DepthPass`
+[134] [135] 资源转变命令
+[136] BeginRenderPass
+[137] 设置StaticUniformBuffer (`RHICmdList.SetStaticUniformBuffers(ParameterStruct.GetStaticUniformBuffers());`)
+[138] 设置ViewPort (`SetStereoViewport(RHICmdList, View, 1.0f);`)
+![Alt text](image-41.png)
+
+接着，在`FMeshDrawCommand::SubmitDraw`中会调用`FMeshDrawCommand::SubmitDrawBegin`将`FMeshDrawCommand`的信息转为`RHICommand`并添加到`RHICommandList`，然后调用`FMeshDrawCommand::SubmitDrawEnd`创建绘制相关的`RHICommand`。此时的调用堆栈如下。
 ![Alt text](image-34.png)
+注： [139][140] 是`FMeshDrawCommand::SubmitDraw`中设置的两条 Breadcrumb（面包屑）调试信息，分别输出了`MaterialName`和`PrePass DDM_ALLOpaque(Forced by Nanite)`
+![Alt text](image-42.png)
 
 ```cpp
 // Engine\Source\Runtime\Renderer\Private\MeshPassProcessor.cpp
@@ -461,7 +484,14 @@ bool FMeshDrawCommand::SubmitDrawBegin(
 在`FMeshDrawCommand::SubmitDrawEnd`中打断点分析，可以发现在`RHICommandList`的末尾新生成了1条`RHICommand`，它就是对应着绘制指令的`FRHICommandDrawIndexedPrimitive`，可以看到其参数与前文的Cube几何参数对应。
 ![Alt text](image-36.png)
 
-此时PrePass的绘制命令已经收集完毕，最终对应着的是这6条`RHICommand`。
+在执行完作为Lambda传入RDG的`DisPatchDraw`后，渲染逻辑又回到了RDG中，在RDG中进行最后的处理，生成了两条结束用的`RHICommand`:
+[147] EndRenderPass
+[148] PopEvent
+
+此时渲染逻辑回到`RenderPrePass`中，`RenderPrePassEditorPrimitives`函数生成了最后的6条`RHICommand`用于绘制编辑器图元。
+![Alt text](image-43.png)
+
+此时PrePass的所有绘制命令已经收集完毕，最终对应着的是以上`RHICommandList`中从95到154共计60条`RHICommand`。
 关于PrePass的分析到此结束，从物体本身的几何信息，加入场景时缓存的`FMeshBatch`，生成对应于`FMeshBatch`的`MeshDrawCommand`，再到最后使用`MeshDrawCommand`中的信息构建`RHICommand`并加入`RHICommandList`，每一个阶段都和上一个阶段的数据互相对应，环环相扣。以此为参考，管中窥豹，可作为复杂的网格绘制管线的分析的起点。
 
 ---
