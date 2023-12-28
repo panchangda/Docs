@@ -342,6 +342,7 @@ void FMeshDrawCommand::SubmitDrawEnd(const FMeshDrawCommand& MeshDrawCommand, ui
 ```
 
 `DrawIndexedPrimitive`在ByPass情况下会直接调用的方法`RHIDrawIndexedPrimitive`由不同图形驱动的RHI实现，实测在windows下只有在FD3D12对应的RHI中打断点才会生效，并没有使用到其他图形驱动的RHI。
+
 `RHICommandList.h`
 ![Alt text](image-14.png)
 
@@ -394,57 +395,72 @@ void FOpenGLDynamicRHI::RHIDrawIndexedPrimitive(FRHIBuffer* IndexBufferRHI, int3
 ![Alt text](image-20.png)
 
 从`Primitives`的`Proxy`的`ResourceName`和`OwnerName`中可以看出第一个primitive对应的是Cube，第二个是Sphere代表的DefaultPawn，剩下三个是LineBatchComponent。
+
 ![Alt text](image-19.png)
 ![Alt text](image-21.png)
 
 #### 静态绘制路径，缓存MeshBatch
 静态绘制路径通常可以被缓存，所以也叫缓存绘制路径，适用的对象可以是静态模型（可在UE编辑器的网格属性面板中指定，见下图）。
+
 ![Alt text](image-30.png)
+
 静态模型在加入场景后，其对应的`FPrimitiveSceneInfo`在调用`AddStaticMeshes`时，被执行缓存处理，调用堆栈如下所示。`AddStaticMeshes`中会添加静态网格元素到场景的静态网格列表，也会缓存静态的MeshDrawCommand（如果开启了缓存）。
 
 我们添加且只添加一个静态的Cube到场景。打断点可以发现在执行完`AddStaticMeshes`后，场景中的`StaticMeshes`已经有了4个元素，其中第0个和第1个就是我们添加的Cube的`FStaticMeshBatch`，他们的`PrimitiveSceneInfo`是一样的。
+
 ![Alt text](image-29.png)
 ![Alt text](image-31.png)
 
 #### 可视性与相关性检测
 `SceneVisibility.cpp`里的`FsceneRender::ComputeViewVisibility`中执行各种剔除与可视性检测，然后在`FSceneRenderer::SetupMeshPass`中遍历各个pass生成drawcommand。在构建最后的绘制列表之前需要把不需要的MeshDrawCommand剔除掉，UE有多种剔除算法，可见性剔除，视锥体剔除等。最后会构建一个View.PrimitiveVisibilityMap。这个VisibilityMap会把没用的MeshDrawCommand丢掉，让它无法进入最后的渲染队列里。
 在进行剔除与可视性检测后的VisibilityMap中可以看到，Cube的可见性标志位为1（可见），Pawn的Sphere的可见性标志位为0（不可见）。
+
 ![Alt text](image-22.png)
 
 在`FsceneRender::ComputeViewVisibility`中还会进行相关性(`Relevance`)的检测，我们加入场景的`Cube`是静态物体，场景中已经缓存了它的`MeshBatch`，但是由于没有缓存它的`MeshDrawCommand`所以每帧都要重新生成这个静态`MeshBatch`的`MeshDrawCommand`。
 
 在`ComputeAndMarkRelevanceForViewParallel`中会计算相关性并且填充`FViewCommands`中的`NumDynamicMeshCommandBuildRequestElements`等信息，这个对应的就是需要构建`MeshDrawCommand`的静态`FMeshBatch`的数量，如下图断点所示，在经过相关性计算后，第一个Pass和第二个Pass对应的`NumDynamicMeshCommandBuildRequestElements`被填充为1，代表该Pass中有一个静态物体生成的`FMeshBatch`需要构建成`MeshDrawCommand`。
+
 ![Alt text](image-32.png)
 
 #### 设置MeshPass与构建MeshDrawCommand
 在`FSceneRenderer::SetupMeshPass`中打断点调试可以看到`ParallelMeshDrawCommandPasses`中的各个Pass的信息被逐个填充，其成员变量`TaskContext`里有该Pass对应的MeshDrawCommand信息。
 `SceneRendering.cpp` 
+
 ![Alt text](image-18.png)
 
 在`GenerateDynamicMeshDrawCommands`中打断点截帧可以发现，在`PrePass`构建过程中，没有`DynamicMeshBatch`，有且只有一个`StaticMeshBatch`，而且根据其`PrimitiveSceneInfo`可以确定这个`MeshBatch`对应的是Cube。
+
 ![Alt text](image-24.png)
 
 `FDepthMeshProcessor::AddMeshBatch`会继续调用直到`BuildMeshDrawCommand`，打断点截帧进行分析，此时的堆栈如下，可以看到堆栈走的是DepthPass的路径。
+
 ![Alt text](image-25.png)
 
 `BuildMeshDrawCommand`中创建了`FMeshDrawCommand`并将其添加到`DrawListStorage`，如下图断点所示，在执行`AddCommand`之前，此时的`DrawListStorage`是空的。
+
 ![Alt text](image-26.png)
 
 在执行完`AddCommand`和`FinalizeCommand`之后，DepthPass的`MeshProcessor`中就有了Cube对应的`FMeshBatch`所生成的`FMeshDrawCommand`的信息。最终生成的`FMeshDrawCommand`的信息主要有着色器绑定(ShaderBindings)、顶点流(VertexStreams)、索引缓冲(IndexBuffer)、PSO(CachedPipelineId)、绘制参数(FirstIndex、NumPrimitive、NumInstances)等。`FDepthPassMeshProcessor`最后共生成了一个`FMeshDrawCommand`，其中的信息可以和Cube的几何信息相对应。
+
 ![Alt text](image-28.png)
 
 #### 生成RHICommand
 在`RenderPrePass`的入口打断点发现在进行`PrePass`的`RHICommand`生成前`RHICommandList`中共有95个`RHICommand`。
+
 ![Alt text](image-37.png)
+
 与RDG的`Passes`列表对照，可以发现这些`RHICommand`是在`RenderPrePass`之前加入RDG的`Pass`生成的。
 
 截取最后的几个`RHICommand`为例子，`FRHICommandBeginRenderPass`中有该`RenderPass`的`Info`和`Name`等信息，对照可以发现这几条`RHICommand`是RDG的`Passes`列表末尾的`Scene.ClearDepthStencil`生成的。
+
 ![Alt text](image-38.png)
 ![Alt text](image-39.png)
 
 在`PrePass`被加入`GraphBuilder`(RDG)之前，会先执行`FParallelMeshDrawCommandPass::BuildRenderingCommands`生成多条`RHICommand`，这些`RHICommand`主要用于在GPU上使用ComputeShader进行`InstanceCulling`剔除相关的计算，遮挡剔除完成后会得到可见的`InstanceIds`存储在`UniformBuffer`中。
 
 在`BuildRenderingCommands`完成后`RHICommandList`中共有131个`RHICommand`。
+
 ![Alt text](image-40.png)
 
 在`PrePass`被加入`GraphBuilder`后，会进行一系列的资源的处理，到执行`DisPatchDraw`中`SubmitDrawCommands`之前，`RHICommandList`中又生成了8条`RHICommand`命令，这些命令分别是
@@ -466,8 +482,11 @@ void FOpenGLDynamicRHI::RHIDrawIndexedPrimitive(FRHIBuffer* IndexBufferRHI, int3
 ![Alt text](image-41.png)
 
 接着，在`FMeshDrawCommand::SubmitDraw`中会调用`FMeshDrawCommand::SubmitDrawBegin`将`FMeshDrawCommand`的信息转为`RHICommand`并添加到`RHICommandList`，然后调用`FMeshDrawCommand::SubmitDrawEnd`创建绘制相关的`RHICommand`。此时的调用堆栈如下。
+
 ![Alt text](image-34.png)
+
 注： [139][140] 是`FMeshDrawCommand::SubmitDraw`中设置的两条 Breadcrumb（面包屑）调试信息，分别输出了`MaterialName`和`PrePass DDM_ALLOpaque(Forced by Nanite)`
+
 ![Alt text](image-42.png)
 
 ```cpp
@@ -495,9 +514,11 @@ bool FMeshDrawCommand::SubmitDrawBegin(
 }
 ```
 在`FMeshDrawCommand::SubmitDrawBegin`中打断点分析，可以发现在`RHICommandList`的末尾新生成了5条`RHICommand`，按顺序分别是1条`FRHICommandSetGraphicsPipelineState`，3条`FRHICommandSetStreamSource`和1条`FRHICommandSetShaderParameters<FRHIGraphicsShader>`
+
 ![Alt text](image-35.png)
 
 在`FMeshDrawCommand::SubmitDrawEnd`中打断点分析，可以发现在`RHICommandList`的末尾新生成了1条`RHICommand`，它就是对应着绘制指令的`FRHICommandDrawIndexedPrimitive`，可以看到其参数与前文的Cube几何参数对应。
+
 ![Alt text](image-36.png)
 
 在执行完作为Lambda传入RDG的`DisPatchDraw`后，渲染逻辑又回到了RDG中，在RDG中进行最后的处理，生成了两条结束用的`RHICommand`:
@@ -507,6 +528,7 @@ bool FMeshDrawCommand::SubmitDrawBegin(
 [148] PopEvent
 
 此时渲染逻辑回到`RenderPrePass`中，`RenderPrePassEditorPrimitives`函数生成了最后的6条`RHICommand`用于绘制编辑器图元。
+
 ![Alt text](image-43.png)
 
 此时PrePass的所有绘制命令已经收集完毕，最终对应着的是以上`RHICommandList`中从95到154共计60条`RHICommand`。
@@ -526,9 +548,11 @@ bool FMeshDrawCommand::SubmitDrawBegin(
 3. 静态绘制路径缓存的`MeshDrawCommand`
    
 依次对应于图上的三种。
+
 ![Alt text](image-44.png)
 
 在`FSceneRenderer::SetupMeshPass`之后可以看到所有Pass收集到的`MeshDrawCommand`。总共有三个Pass有`MeshDrawCommand`，分别是`PrePass`，`BasePass`，`HitProxy`，每个Pass都只有一个`MeshDrawCommand`，因此场景里总共有三个`MeshDrawCommand`，这些`FMeshDrawCommand`会在渲染对应Pass时产生一系列`RHICommand`。
+
 ![Alt text](image-47.png)
 ![Alt text](image-46.png)
 
@@ -536,14 +560,17 @@ bool FMeshDrawCommand::SubmitDrawBegin(
 前文中提到，在`FDeferredShadingSceneRenderer::Render`中，有许多的`RenderXXXPass()`函数会执行对应于`EMeshPass::Type`定义的33个Pass的渲染，这些渲染函数会产生一系列的`RHICommand`。实际上，除了这些函数之外，还有许多别的函数也会产生`RHICommand`。33个Pass产生的`MeshDrawCommand`可以对应到一系列的`RHICommand`，但是并非所有的`RHICommand`都是由`MeshDrawCommand`生成而来，各种在GPU上的计算如光照计算，遮挡剔除等等，都会产生一系列的`RHICommand`。
 
 分析`RHICommand`的来源可以从被添加到RDG的`Pass`入手，在`RenderBasePass`之前打断点查看`GraphBuilder`信息可以发现，此时已有733条`RHICommand`和89个RDGPass。
+
 ![Alt text](image-48.png)
 
 其中既有`Scene.BuildHZB(ViewId=0)`和`Scene.ComputeLightGrid.CullLights`这样的在GPU上的遮挡剔除相关的计算，也有之前分析过的`PrePass`相关的绘制。
+
 ![Alt text](image-50.png)
 ![Alt text](image-49.png)
 ![Alt text](image-52.png)
 
 最后整个场景生成了2148条`RHICommand`。
+
 ![Alt text](image-51.png)
 
 ---
@@ -595,6 +622,7 @@ void FParallelMeshDrawCommandPass::DispatchPassSetup()
 生成的FMeshDrawCommand被保存在FMeshPassDrawListContext中。
 > 官方文档中对 FMeshPassProcessor 的解释：
 ![Alt text](image-1.png)
+
 #### GenerateDynamicMeshDrawCommands()
 转换指定EMeshPass中的每个FMeshBatch到一组FMeshDrawCommand。FMeshDrawCommandPassSetupTask要用到。
 ```cpp
