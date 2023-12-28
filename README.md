@@ -12,6 +12,7 @@
 ### Entry Overview
 Unreal Engine 5.2 中的渲染绘制的入口在 `FViewPort::Draw()`，调用堆栈如下图所示，`Draw()`函数由引擎的更新函数`Tick()`每帧调用。
 ![Alt text](image-23.png)
+
 `Draw()`中会调用`FRendererModule::BeginRenderingViewFamily`(`FRendererModule::BeginRenderingViewFamilies`)，向渲染线程发送消息以开始渲染流程。
 ```cpp
 // Engine\Source\Runtime\Engine\Private\GameViewportClient.cpp
@@ -259,6 +260,7 @@ void GenerateDynamicMeshDrawCommands(
 ```
 
 `FMeshPassProcessor::BuildMeshDrawCommands`中会创建`FMeshDrawCommand`并填充信息，然后将其添加到`DrawListContext`中，最后再执行`FinalizeCommand`完成MeshDrawCommands的构建。
+
 以`FDynamicPassMeshDrawListContext`为例，`FDynamicPassMeshDrawListContext::FinalizeCommand`中使用传入的`FMeshDrawCommand`创建`FVisibleMeshDrawCommand`并添加到`FMeshProcessor`的`DrawList`中， `DrawList`的类型是`FMeshCommandOneFrameArray`，`FMeshCommandOneFrameArray`的定义为： `typedef TArray<FVisibleMeshDrawCommand, SceneRenderingAllocator> FMeshCommandOneFrameArray;`。`FVisibleMeshDrawCommand`主要用于`View`之间的信息传递，其中有指向对应的`FMeshDrawCommand`的指针，绘制所需要的信息储存且仅存储在`FMeshDrawCommand`中。
 ```cpp
 // Engine\Source\Runtime\Renderer\Public\MeshPassProcessor.h
@@ -318,6 +320,7 @@ void FDeferredShadingSceneRenderer::RenderPrePass(FRDGBuilder& GraphBuilder, FRD
 ...
 }
 ```
+
 `FDrawVisibleMeshCommandAnyThreadTask`执行的绘制指令单个MeshDrawCommand的绘制命令的创建的调用堆栈如下，绘制的任务并不是立即执行的，而是由RDG的`Execute()`发起执行。
 ![Alt text](image-12.png)
 ```cpp
@@ -382,6 +385,7 @@ void FOpenGLDynamicRHI::RHIDrawIndexedPrimitive(FRHIBuffer* IndexBufferRHI, int3
 
 #### 场景信息
 游戏线程在`FRendererModule::BeginRenderingViewFamily`中初始化渲染线程的场景渲染器`FSceneRenderer`，然后在渲染线程执行的方法`RenderViewFamilies_RenderThread`中调用`FSceneRenderer`的`Render()`方法进行渲染。
+
 在渲染线程遍历`SceneRenders`执行实际的渲染函数`Render()`前打断点截帧，查看`Scene`里的`Primitives`信息，`Primitives`里的元素实际上是`FPrimitiveSceneInfo`。
 `SceneRendering.cpp`
 ![Alt text](image-16.png)
@@ -397,6 +401,7 @@ void FOpenGLDynamicRHI::RHIDrawIndexedPrimitive(FRHIBuffer* IndexBufferRHI, int3
 静态绘制路径通常可以被缓存，所以也叫缓存绘制路径，适用的对象可以是静态模型（可在UE编辑器的网格属性面板中指定，见下图）。
 ![Alt text](image-30.png)
 静态模型在加入场景后，其对应的`FPrimitiveSceneInfo`在调用`AddStaticMeshes`时，被执行缓存处理，调用堆栈如下所示。`AddStaticMeshes`中会添加静态网格元素到场景的静态网格列表，也会缓存静态的MeshDrawCommand（如果开启了缓存）。
+
 我们添加且只添加一个静态的Cube到场景。打断点可以发现在执行完`AddStaticMeshes`后，场景中的`StaticMeshes`已经有了4个元素，其中第0个和第1个就是我们添加的Cube的`FStaticMeshBatch`，他们的`PrimitiveSceneInfo`是一样的。
 ![Alt text](image-29.png)
 ![Alt text](image-31.png)
@@ -407,11 +412,12 @@ void FOpenGLDynamicRHI::RHIDrawIndexedPrimitive(FRHIBuffer* IndexBufferRHI, int3
 ![Alt text](image-22.png)
 
 在`FsceneRender::ComputeViewVisibility`中还会进行相关性(`Relevance`)的检测，我们加入场景的`Cube`是静态物体，场景中已经缓存了它的`MeshBatch`，但是由于没有缓存它的`MeshDrawCommand`所以每帧都要重新生成这个静态`MeshBatch`的`MeshDrawCommand`。
+
 在`ComputeAndMarkRelevanceForViewParallel`中会计算相关性并且填充`FViewCommands`中的`NumDynamicMeshCommandBuildRequestElements`等信息，这个对应的就是需要构建`MeshDrawCommand`的静态`FMeshBatch`的数量，如下图断点所示，在经过相关性计算后，第一个Pass和第二个Pass对应的`NumDynamicMeshCommandBuildRequestElements`被填充为1，代表该Pass中有一个静态物体生成的`FMeshBatch`需要构建成`MeshDrawCommand`。
 ![Alt text](image-32.png)
 
 #### 设置MeshPass与构建MeshDrawCommand
-在`FSceneRenderer::SetupMeshPass`中打断点调试可以看到`ParallelMeshDrawCommandPasses`中的各个Pass的信息被逐个填充，其成员变量`TaskContext`里有该Pass对应的MeshDrawCommand信息 
+在`FSceneRenderer::SetupMeshPass`中打断点调试可以看到`ParallelMeshDrawCommandPasses`中的各个Pass的信息被逐个填充，其成员变量`TaskContext`里有该Pass对应的MeshDrawCommand信息。
 `SceneRendering.cpp` 
 ![Alt text](image-18.png)
 
@@ -431,22 +437,32 @@ void FOpenGLDynamicRHI::RHIDrawIndexedPrimitive(FRHIBuffer* IndexBufferRHI, int3
 在`RenderPrePass`的入口打断点发现在进行`PrePass`的`RHICommand`生成前`RHICommandList`中共有95个`RHICommand`。
 ![Alt text](image-37.png)
 与RDG的`Passes`列表对照，可以发现这些`RHICommand`是在`RenderPrePass`之前加入RDG的`Pass`生成的。
+
 截取最后的几个`RHICommand`为例子，`FRHICommandBeginRenderPass`中有该`RenderPass`的`Info`和`Name`等信息，对照可以发现这几条`RHICommand`是RDG的`Passes`列表末尾的`Scene.ClearDepthStencil`生成的。
 ![Alt text](image-38.png)
 ![Alt text](image-39.png)
 
 在`PrePass`被加入`GraphBuilder`(RDG)之前，会先执行`FParallelMeshDrawCommandPass::BuildRenderingCommands`生成多条`RHICommand`，这些`RHICommand`主要用于在GPU上使用ComputeShader进行`InstanceCulling`剔除相关的计算，遮挡剔除完成后会得到可见的`InstanceIds`存储在`UniformBuffer`中。
+
 在`BuildRenderingCommands`完成后`RHICommandList`中共有131个`RHICommand`。
 ![Alt text](image-40.png)
 
 在`PrePass`被加入`GraphBuilder`后，会进行一系列的资源的处理，到执行`DisPatchDraw`中`SubmitDrawCommands`之前，`RHICommandList`中又生成了8条`RHICommand`命令，这些命令分别是
+
 [131] pop之前的event
+
 [132] 设置Breadcrumb（面包屑）调试信息，具体为`PrePass DDM_ALLOpaque(Forced by Nanite)`
+
 [133] push当前的event，具体为`DepthPass`
+
 [134] [135] 资源转变命令
+
 [136] BeginRenderPass
+
 [137] 设置StaticUniformBuffer (`RHICmdList.SetStaticUniformBuffers(ParameterStruct.GetStaticUniformBuffers());`)
+
 [138] 设置ViewPort (`SetStereoViewport(RHICmdList, View, 1.0f);`)
+
 ![Alt text](image-41.png)
 
 接着，在`FMeshDrawCommand::SubmitDraw`中会调用`FMeshDrawCommand::SubmitDrawBegin`将`FMeshDrawCommand`的信息转为`RHICommand`并添加到`RHICommandList`，然后调用`FMeshDrawCommand::SubmitDrawEnd`创建绘制相关的`RHICommand`。此时的调用堆栈如下。
@@ -485,13 +501,16 @@ bool FMeshDrawCommand::SubmitDrawBegin(
 ![Alt text](image-36.png)
 
 在执行完作为Lambda传入RDG的`DisPatchDraw`后，渲染逻辑又回到了RDG中，在RDG中进行最后的处理，生成了两条结束用的`RHICommand`:
+
 [147] EndRenderPass
+
 [148] PopEvent
 
 此时渲染逻辑回到`RenderPrePass`中，`RenderPrePassEditorPrimitives`函数生成了最后的6条`RHICommand`用于绘制编辑器图元。
 ![Alt text](image-43.png)
 
 此时PrePass的所有绘制命令已经收集完毕，最终对应着的是以上`RHICommandList`中从95到154共计60条`RHICommand`。
+
 关于PrePass的分析到此结束，从物体本身的几何信息，加入场景时缓存的`FMeshBatch`，生成对应于`FMeshBatch`的`MeshDrawCommand`，再到最后使用`MeshDrawCommand`中的信息构建`RHICommand`并加入`RHICommandList`，每一个阶段都和上一个阶段的数据互相对应，环环相扣。以此为参考，管中窥豹，可作为复杂的网格绘制管线的分析的起点。
 
 ---
@@ -499,9 +518,13 @@ bool FMeshDrawCommand::SubmitDrawBegin(
 ## The Entire Scene
 ### All MeshDrawCommands
 `FParallelMeshDrawCommandPass::DispatchPassSetup`时会将该Pass中三种不同路径来源的`FMeshDrawCommand`收集完毕，这三个路径分别是
+
 1. DynamicMesh
+   
 2. 静态绘制路径缓存了`FMeshBatch`但是需要动态构建`MeshDrawCommand`的StaticMesh
+
 3. 静态绘制路径缓存的`MeshDrawCommand`
+   
 依次对应于图上的三种。
 ![Alt text](image-44.png)
 
@@ -511,6 +534,7 @@ bool FMeshDrawCommand::SubmitDrawBegin(
 
 ### All RHICommands
 前文中提到，在`FDeferredShadingSceneRenderer::Render`中，有许多的`RenderXXXPass()`函数会执行对应于`EMeshPass::Type`定义的33个Pass的渲染，这些渲染函数会产生一系列的`RHICommand`。实际上，除了这些函数之外，还有许多别的函数也会产生`RHICommand`。33个Pass产生的`MeshDrawCommand`可以对应到一系列的`RHICommand`，但是并非所有的`RHICommand`都是由`MeshDrawCommand`生成而来，各种在GPU上的计算如光照计算，遮挡剔除等等，都会产生一系列的`RHICommand`。
+
 分析`RHICommand`的来源可以从被添加到RDG的`Pass`入手，在`RenderBasePass`之前打断点查看`GraphBuilder`信息可以发现，此时已有733条`RHICommand`和89个RDGPass。
 ![Alt text](image-48.png)
 
@@ -529,21 +553,27 @@ bool FMeshDrawCommand::SubmitDrawBegin(
 #### FMeshBatchElement
 FMeshBatchElement里面储存了单个网格所需的数据，如IndexBuffer，shaderParameters等
 #### FMeshBatch
-FMeshBatch包含了一个pass的所需要的全部渲染数据，它会维护一个FMeshBatchElement列表，FMeshBatchElement包含了单个网格绘制所需的数据，包括UniformBuffer、IndexBuffer等等。事实上，最后一个FMeshBatchElement就对应了一次DrawCall
-FMeshBatch解耦了Pass和FPrimitiveSceneProxy，包含了绘制pass所需信息
-他拥有一组FmeshBatchElement（但绝大多数情况下只用一个，除了FInstancedStaticMeshSceneProxy和FHierarchicalStaticMeshSceneProxy中的接口会对数组作填充，其余情况都只用到一个FMeshBatchElement），他们共享相同材质的vertexFactory
+FMeshBatch包含了一个pass的所需要的全部渲染数据，它会维护一个FMeshBatchElement列表，FMeshBatchElement包含了单个网格绘制所需的数据，包括UniformBuffer、IndexBuffer等等。事实上，最后一个FMeshBatchElement就对应了一次DrawCall.
+
+FMeshBatch解耦了Pass和FPrimitiveSceneProxy，包含了绘制pass所需信息。
+
+拥有一组FmeshBatchElement（但绝大多数情况下只用一个，除了FInstancedStaticMeshSceneProxy和FHierarchicalStaticMeshSceneProxy中的接口会对数组作填充，其余情况都只用到一个FMeshBatchElement），他们共享相同材质的vertexFactory
+
 #### FMeshElementCollector
 FMeshElementCollector 由 FSceneRenderer 创建且一一对应。
+
 收集器收集完对应view的可见图元列表后，通常拥有一组需要渲染的FMeshBatch列表，以及它们的管理数据和状态，为后续的流程收集和准备足够的准备。
+
 此外，FMeshElementCollector在收集完网格数据后，还可以指定需要等待处理的任务列表，以实现多线程并行处理的同步。
+
 #### GetDynamicMeshElements() & GetDynamicElementsSection()
 ```cpp
 void FSceneRenderer::GatherDynamicMeshElements(){
     PrimitiveSceneInfo->Proxy->GetDynamicMeshElements();
 }
 ```
-是给每个图元对象向渲染器（收集器）添加可见图元元素的机会，由具体的子类实现，如 FSkeletalMeshSceneProxy
-FSkeletalMeshSceneProxy会根据不同的LOD索引，给每个Section网格添加一个FMeshBatch。
+是给每个图元对象向渲染器（收集器）添加可见图元元素的机会，由具体的子类实现，如 FSkeletalMeshSceneProxy，FSkeletalMeshSceneProxy会根据不同的LOD索引，给每个Section网格添加一个FMeshBatch。
+
 #### ParallelMeshDrawCommandPasses
 ```cpp
 void FParallelMeshDrawCommandPass::DispatchPassSetup()
@@ -559,7 +589,9 @@ void FParallelMeshDrawCommandPass::DispatchPassSetup()
 在FMeshDrawCommandPassSetupTask中进行绘制指令生成与相关数据的写入
 #### FMeshPassProcessor & AddMeshBatch() & TryAddMeshBatch() & BuildMeshDrawCommands() & FMeshPassDrawListContext
 每个Pass都对应了一个FMeshPassProcessor，每个FMeshPassProcessor保存了该Pass需要绘制的所有FMeshDrawCommand，以便渲染器在合适的时间触发并渲染。
-不同Pass的通过调用AddMeshBatch()方法处理FMeshBatch中的几何信息，主要的处理在TryAddMeshBatch()中，该方法中进行了shader绑定，渲染转台处理等，最后根据不同的选项和质量选择不同的Process使用BuildMeshDrawCommands()将FMeshBatch转为FMeshDrawCommand
+
+不同Pass的通过调用AddMeshBatch()方法处理FMeshBatch中的几何信息，主要的处理在TryAddMeshBatch()中，该方法中进行了shader绑定，渲染转台处理等，最后根据不同的选项和质量选择不同的Process使用BuildMeshDrawCommands()将FMeshBatch转为FMeshDrawCommand。
+
 生成的FMeshDrawCommand被保存在FMeshPassDrawListContext中。
 > 官方文档中对 FMeshPassProcessor 的解释：
 ![Alt text](image-1.png)
@@ -575,9 +607,13 @@ void GenerateDynamicMeshDrawCommands(){
 > FMeshDrawCommand（网格绘制指令），记录了绘制单个Mesh所需的所有资源和数据，且不应该有多余的数据，如果需要在InitView传递数据，可用FVisibleMeshDrawCommand。
 #### FParallelMeshDrawCommandPass & DispatchPassSetup() & DispatchDraw()
 Encapsulates two parallel tasks - mesh command setup task and drawing task
+
 DispatchPassSetup() 对应 mesh command setup task 
+
 DispatchDraw() 对应 drawing task
+
 同时保存着该pass的meshdrawcommand
+
 #### RHICommand
 RHI全称Rendering Hardware Interface（渲染硬件接口），是不同图形API的抽象层，而RHICommandList便是负责收录与图形API无关的中间层绘制指令和数据。
 #### RHICommandList
